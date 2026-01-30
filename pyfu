@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+PYFU_VERSION="1.1.0"
+PYFU_DATE="2026-01-30"
+
+# Useful methods. \o/
+#
+set_variable () { export $1="$2"; }
+unset_variable () { unset $1; }
+
+path_append ()  { path_remove $1; set_variable PATH "$PATH:$1"; }
+path_prepend () { path_remove $1; set_variable PATH "$1:$PATH"; }
+path_remove ()  { set_variable PATH `echo $PATH | awk -v RS=: -v ORS=: '$0 != "'$1'"' | sed 's/:$//'`; }
+
+command_exists () { type "$1" &> /dev/null; }
+
+warn () { echo -e "$1" >&2; }
+info () { warn "$1"; }
+
+deactivate_previous_python_version () {
+  if [ $PYFU_PYTHON_VERSION ]; then
+    path_remove "$PYTHONS_ROOT/$PYFU_PYTHON_VERSION/bin"
+    unset_variable PYFU_PYTHON_VERSION
+  fi
+}
+
+_pyfu_activate () {
+  local VERSION COMMAND MSG SOURCE
+  local PYTHONS_ROOT="$HOME/.pythons"
+  local VERSION_DIR="$PYTHON_VERSION_DIR"
+
+  # Run-time configuration
+  #
+  if [[ $1 =~ ^@ ]]; then
+    VERSION=$1; shift
+    VERSION=${VERSION:1}
+  fi
+  COMMAND="$@"
+  SOURCE="from command line"
+
+  # fall back to ($PYTHON_VERSION_DIR || $PWD)/.python-version if no version is given
+  if [ ! "$VERSION_DIR" ]; then VERSION_DIR="$PWD"; fi
+  read_version_from_file () { if [ -f "$1" ]; then SOURCE="from $1"; VERSION=`head -n 1 $1`; fi; }
+  [ -n "$VERSION" ] || read_version_from_file "$VERSION_DIR/.python-version"
+  
+  # sanity checks
+  [ ! "$VERSION" ] && warn "Please specify the Python version to activate." && return 1
+
+  if [[ "$VERSION" == "system" ]]; then
+    deactivate_previous_python_version
+    MSG="Activated system Python."
+  else
+    # additional sanity checks
+    PYTHON_ROOT="$PYTHONS_ROOT/$VERSION"
+    if [ ! -e $PYTHON_ROOT ]; then
+      PYTHONS_ROOT="/opt/pythons"
+      PYTHON_ROOT="$PYTHONS_ROOT/$VERSION"
+    fi
+    
+    if [ ! -e $PYTHON_ROOT ]; then
+      warn "Python $VERSION was requested, but is not installed ($SOURCE)"
+      warn "If you have pyenv installed, you can install the requested version like this:"
+      warn "\npyenv install $VERSION \$HOME/.pythons/$VERSION"
+      return 1
+    fi
+
+    deactivate_previous_python_version
+
+    PYTHON_BIN="$PYTHON_ROOT/bin/python"
+    if [ ! -e $PYTHON_BIN ]; then
+      warn "Could not find the python executable at $PYTHON_BIN ($SOURCE)"
+      warn "Make sure that Python is properly installed at $PYTHON_ROOT"
+      return 1
+    fi
+    
+    # activate requested version
+    path_prepend "$PYTHON_ROOT/bin"
+    set_variable "PYFU_PYTHON_VERSION" "$VERSION"
+    
+    MSG="Activated Python $PYFU_PYTHON_VERSION"
+  fi
+
+  info "$MSG ($SOURCE)"
+
+  # execute command, if given
+  if [ -n "$COMMAND" ]; then
+    eval $COMMAND
+  else
+    return 0
+  fi
+}
+
+
+# check for our favorite command line options!
+#
+if [ "$1" = "--help" ]; then
+  cat <<EOD
+Usage:  pyfu [@<version>] [command]
+Options:
+        --help
+        --init [--auto]
+        --list
+        --version
+EOD
+  exit 0
+
+elif [ "$1" = "--version" ]; then
+  cat <<EOD
+pyfu, version $PYFU_VERSION ($PYFU_DATE, https://github.com/mtgrosser/pyfu)
+EOD
+  exit 0
+
+elif [ "$1" = "--list" ]; then
+  if [ -e "$HOME/.pythons" ]; then
+    ls -1 "$HOME/.pythons"
+  fi
+  if [ -e "/opt/pythons" ]; then
+    ls -1 "/opt/pythons"
+  fi
+  exit 0
+
+# initialization code (run from shell startup script)
+#
+elif [ "$1" = "--init" ]; then
+  cat <<EOD
+alias pyfu-env="source pyfu"
+
+# enable tab completion for bash and zsh
+if command -v complete >/dev/null 2>&1; then
+  _pyfu_complete_version() {
+    if [ -d "$HOME/.pythons" ]; then
+      cur="\${COMP_WORDS[COMP_CWORD]}"
+      home_opts=\$(\\ls -1 $HOME/.pythons | sed -e "s/^/@/")
+      opt_opts=\$(\\ls -1 /opt/pythons | sed -e "s/^/@/")
+
+      if [[ \$COMP_CWORD == 1 ]]; then
+        COMPREPLY=( \$(compgen -W "\${opt_opts} \${home_opts} @system" -- \${cur}) )
+        return 0
+      fi
+    fi
+  }
+  complete -o nospace -F _pyfu_complete_version pyfu
+  complete -o nospace -F _pyfu_complete_version pyfu-env
+
+elif command -v compdef >/dev/null 2>&1; then
+  _pyfu() {
+    local curcontext="\$curcontext" state line _pythons ret=1
+    _arguments -w -S '(-)--help[show usage and exit]: :->noargs' '1: :->versions' '*::: :->args' && ret=0
+
+    case \$state in
+      versions)
+        _pythons=( \$(\\ls -1 "$HOME/.pythons" 2>/dev/null | sed -e "s/^/@/") "@system" )
+        _values 'pythons' \$_pythons && ret=0
+        ;;
+      args)
+        _normal && ret=0
+        ;;
+    esac
+    return \$ret
+  }
+  compdef _pyfu pyfu pyfu-env
+fi
+EOD
+
+  # optional automatic mode
+  #
+  if [ "$2" = "--auto" ]; then
+    cat <<EOD
+function _pyfu_auto() {
+  [ -f "\$PWD/.python-version" ] && source pyfu true
+  return 0
+}
+
+if [ -n "\$ZSH_VERSION" ]; then
+  chpwd_functions=(\${chpwd_functions[@]} "_pyfu_auto")
+else
+  function cd() {
+    builtin cd "\$@" && _pyfu_auto
+  }
+fi
+_pyfu_auto
+EOD
+  fi
+
+  exit 0
+
+# normal operation
+#
+else
+  _pyfu_activate $@
+fi
